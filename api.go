@@ -86,7 +86,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	// Per-parameter defaults (use the user's standard values when specific param missing)
 	// Count already defaults to 1_000_000 in constructor above.
 	if q.Get("iter") == "" {
-		gp.Iterations = 8000
+		gp.Iterations = 6000
 	}
 	if q.Get("points") == "" {
 		gp.NumPoints = 20
@@ -97,10 +97,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	if q.Get("entropy") == "" {
 		gp.Entropy.Mode = "mix"
 	}
-	if q.Get("http") == "" {
-		// default HTTP seed source when none supplied
-		gp.Entropy.HTTP = []string{""}
-	}
+	// leave gp.Entropy.HTTP as set in constructor when no http query param is provided
 	if q.Get("whiten") == "" {
 		gp.Whiten = "aes"
 	}

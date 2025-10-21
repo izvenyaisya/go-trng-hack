@@ -115,7 +115,12 @@ func seedFromHTTP(urls []string) int64 {
 func rawFromHTTP(urls []string) []byte {
 	cli := &http.Client{Timeout: 3 * time.Second}
 	h := sha256.New()
+	var direct []byte
+	var gotDirect bool
 	for _, u := range urls {
+		if strings.TrimSpace(u) == "" {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		resp, err := cli.Do(req)
@@ -127,13 +132,23 @@ func rawFromHTTP(urls []string) []byte {
 				body, _ := io.ReadAll(resp.Body)
 				sbody := strings.TrimSpace(string(body))
 				// if body is 64-hex chars, use raw bytes directly
+				// if body is 64-hex chars, decode it; otherwise take trimmed plain text
 				if len(sbody) == 64 {
 					if b, err := hex.DecodeString(sbody); err == nil {
-						// return immediately these bytes as strong source
-						h.Write(b)
+						// deterministic: use decoded bytes directly
+						direct = make([]byte, len(b))
+						copy(direct, b)
+						gotDirect = true
 						return
 					}
 				}
+				if sbody != "" {
+					// deterministic: hash the trimmed plain-text (no time salt)
+					hh := sha256.Sum256([]byte(sbody))
+					h.Write(hh[:])
+					return
+				}
+				// fallback: include some headers/status/URL bytes
 				tmp := make([]byte, 512)
 				copy(tmp, body)
 				h.Write([]byte(u))
@@ -146,6 +161,10 @@ func rawFromHTTP(urls []string) []byte {
 				}
 				h.Write(tmp)
 			}()
+			if gotDirect {
+				cancel()
+				return direct
+			}
 		}
 		cancel()
 	}

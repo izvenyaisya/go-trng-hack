@@ -32,10 +32,22 @@ func main() {
 	mux.HandleFunc("/txs", txsHandler)
 	mux.HandleFunc("/chain", chainHandler)
 	mux.HandleFunc("/stats/upload", uploadStatsHandler)
+	// wrap with CORS middleware
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// permissive CORS for convenience
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 
 	srv := &http.Server{
 		Addr:              ":4040",
-		Handler:           mux,
+		Handler:           handler,
 		ReadTimeout:       5 * time.Second,
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      600 * time.Second,
