@@ -986,6 +986,62 @@ func txStats(w http.ResponseWriter, r *http.Request, id string) {
 	if tx == nil {
 		return
 	}
+	// Special-case: tier transactions (lottery) don't have a TRNG bitstream to run
+	// NIST-like tests on. Provide simple statistics: uniqueness, min/max, duplicates.
+	if len(tx.TierNumbers) > 0 {
+		nums := tx.TierNumbers
+		n := len(nums)
+		seen := make(map[int]int)
+		for _, v := range nums {
+			seen[v]++
+		}
+		dupCount := 0
+		for _, c := range seen {
+			if c > 1 {
+				dupCount += c - 1
+			}
+		}
+		minv, maxv := math.MaxInt64, math.MinInt64
+		sum := 0
+		for _, v := range nums {
+			if v < minv {
+				minv = v
+			}
+			if v > maxv {
+				maxv = v
+			}
+			sum += v
+		}
+		mean := float64(0)
+		if n > 0 {
+			mean = float64(sum) / float64(n)
+		}
+
+		tests := map[string]any{
+			"uniqueness": map[string]any{"unique": dupCount == 0, "duplicates": dupCount, "n": n},
+			"range":      map[string]any{"min": minv, "max": maxv, "mean": mean},
+		}
+
+		// build simple report rows compatible with existing UI
+		rows := []TestRow{
+			{Name: "Tier: Uniqueness", Values: map[string]float64{"duplicates": float64(dupCount), "n": float64(n)}, Status: "Passed"},
+			{Name: "Tier: Range", Values: map[string]float64{"min": float64(minv), "max": float64(maxv), "mean": mean}, Status: "Info"},
+		}
+		if dupCount > 0 {
+			rows[0].Status = "Failed"
+		}
+
+		resp := map[string]any{
+			"tx_id":   tx.TxID,
+			"count":   n,
+			"numbers": nums,
+			"tests":   sanitizeForJSON(tests),
+			"report":  sanitizeReport(rows),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
 	// читаем байты из TRNG и распаковываем биты MSB-first, как раньше
 	nBits := tx.Count
 	tr := NewTRNGFromTx(tx)
