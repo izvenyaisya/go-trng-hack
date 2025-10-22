@@ -651,9 +651,24 @@ func txTRNG(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	typ := strings.ToLower(q.Get("type"))
 
-	tr := NewTRNGFromTx(tx)
+	// Reconstruct bits from the stored simulation (chaotic movement) so
+	// the output reflects the simulation-derived TRNG rather than the
+	// HMAC-DRBG stream. This follows the same pipeline used at
+	// generation: runSimulation -> expandBitsFromPathDigest.
+	gp := paramsFromTx(tx)
+	_, digest := runSimulation(tx.Seed, gp)
+	bits := expandBitsFromPathDigest(digest, nBits, gp.Whiten)
+
+	// Pack bits (0/1 bytes) into bytes MSB-first per byte
 	needed := (nBits + 7) / 8
-	data := tr.ReadBytes(needed)
+	data := make([]byte, needed)
+	for i := 0; i < nBits; i++ {
+		if bits[i] != 0 {
+			byteIndex := i / 8
+			bitPos := 7 - (i % 8) // MSB-first
+			data[byteIndex] |= 1 << uint(bitPos)
+		}
+	}
 
 	// zero out unused LSBs in last byte so packed output contains exactly nBits
 	if nBits%8 != 0 {
