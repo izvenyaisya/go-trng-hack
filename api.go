@@ -492,32 +492,54 @@ func txVerify(w http.ResponseWriter, r *http.Request, id string) {
 	if tx == nil {
 		return
 	}
-
-	// пересчёт dataHash и bitsHash
-	// Важно: при генерации DataHash вычислялся как SHA256(pathDigest)
-	// (см. generateHandler). Ранее здесь ошибочно хешировался JSON симуляции,
-	// что приводило к постоянному несоответствию. Считаем так же, как при генерации.
-	gp := paramsFromTx(tx)
-	_, digest := runSimulation(tx.Seed, gp)
-	// dh2 должен быть SHA256 от path-digest, чтобы совпадать с tx.DataHash
-	dh2 := sha256.Sum256(digest[:])
-	bits := expandBitsFromPathDigest(digest, tx.Count, gp.Whiten)
-	hb := sha256.New()
-	for _, b := range bits {
-		if b != 0 {
-			hb.Write([]byte{1})
-		} else {
-			hb.Write([]byte{0})
-		}
-	}
-	bits2 := hex.EncodeToString(hb.Sum(nil))
-
 	resp := map[string]any{
 		"chain_valid":        ok,
 		"tx_found":           true,
-		"data_hash_match":    hex.EncodeToString(dh2[:]) == tx.DataHash,
-		"bits_hash_match":    bits2 == tx.BitsHash,
+		"data_hash_match":    false,
+		"bits_hash_match":    false,
 		"published_in_chain": false,
+	}
+
+	// Special-case: tier (lottery) transactions don't have a SimulationData path
+	// and therefore cannot be verified by re-running the simulation. For those
+	// we verify the stored HMAC signature over {seed, numbers, winners} and
+	// treat data/bits match as the signature match result.
+	if len(tx.TierNumbers) > 0 || len(tx.TierWinners) > 0 {
+		// recompute payload
+		payload := map[string]any{
+			"seed":    tx.Seed,
+			"numbers": tx.TierNumbers,
+			"winners": tx.TierWinners,
+		}
+		pb, _ := json.Marshal(payload)
+		// ensure signingKey is available
+		if len(signingKey) == 0 {
+			initSigningKey()
+		}
+		mac := hmac.New(sha256.New, signingKey)
+		mac.Write(pb)
+		expected := fmt.Sprintf("%x", mac.Sum(nil))
+		sigMatch := expected == tx.Signature
+		resp["data_hash_match"] = sigMatch
+		resp["bits_hash_match"] = sigMatch
+	} else {
+		// пересчёт dataHash и bitsHash for regular simulation tx
+		gp := paramsFromTx(tx)
+		_, digest := runSimulation(tx.Seed, gp)
+		// dh2 должен быть SHA256 от path-digest, чтобы совпадать с tx.DataHash
+		dh2 := sha256.Sum256(digest[:])
+		bits := expandBitsFromPathDigest(digest, tx.Count, gp.Whiten)
+		hb := sha256.New()
+		for _, b := range bits {
+			if b != 0 {
+				hb.Write([]byte{1})
+			} else {
+				hb.Write([]byte{0})
+			}
+		}
+		bits2 := hex.EncodeToString(hb.Sum(nil))
+		resp["data_hash_match"] = hex.EncodeToString(dh2[:]) == tx.DataHash
+		resp["bits_hash_match"] = bits2 == tx.BitsHash
 	}
 	// проверим в блоке
 	chainMutex.RLock()
