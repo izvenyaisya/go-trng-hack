@@ -675,7 +675,7 @@ func testSerial(seq []int, m int) map[string]any {
 		for i := (1 << mm) - 1; i <= (1<<(mm+1))-2; i++ {
 			sum += float64(P[i] * P[i])
 		}
-	return (sum*float64(int(1<<mm)))/float64(n) - float64(n)
+		return (sum*float64(int(1<<mm)))/float64(n) - float64(n)
 	}
 	psim0 := psi(m)
 	psim1 := psi(m - 1)
