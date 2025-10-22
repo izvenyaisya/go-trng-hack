@@ -287,7 +287,7 @@ func uploadStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mode == "nist" {
-		if _, err := exec.LookPath("assess"); err != nil {
+		if _, err := exec.LookPath("./assess"); err != nil {
 			// assess not found — run local JSON runner on the uploaded bytes
 			bits := unpackBitsFromBytes(data)
 			// ensure minimum length like writeASCIIBitsTemp would
