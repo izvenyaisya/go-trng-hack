@@ -47,10 +47,10 @@ func main() {
 	srv := &http.Server{
 		Addr:              ":4040",
 		Handler:           handler,
-		ReadTimeout:       5 * time.Second,
-		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      600 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second, // мало, против slowloris
+		ReadTimeout:       2 * time.Hour,   // покрывает медленные аплоады
+		WriteTimeout:      2 * time.Hour,   // ответ + возможная отдача после обработки
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	log.Printf("rng-chaos server on %s", srv.Addr)
