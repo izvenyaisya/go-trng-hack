@@ -227,12 +227,6 @@ HTTP API
   - При изменении алгоритма whitening старые `BitsHash` перестанут совпадать — храните `Provenance.Whiten` вместе с транзакцией.
   - Для тестов воспроизводимости используйте `repro` + фиксированный `seed64` и проверяйте `DataHash`/`BitsHash`.
 
-  ## Рекомендации по расширению
-
-  - Добавить unit-тест, который вызывает `/generate?entropy=repro&seed64=...` и затем проверяет, что `/tx/{id}/trng?n=...` даёт ожидаемый hex-поток (можно реализовать в `tools/`).
-  - Экспорт `PerHTTPSeeds` в файл при создании транзакции для внешнего хранения и воспроизведения без полного `store.json`.
-
-  ---
 
 ## Описание JSON-ответа `/tx/{id}/verify`
 
@@ -250,7 +244,7 @@ HTTP API
 {
   "chain_valid": true,
   "tx_found": true,
-  "data_hash_match": false,
+  "data_hash_match": true,
   "bits_hash_match": true,
   "published_in_chain": true
 }

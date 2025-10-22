@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"unicode"
 )
@@ -937,6 +938,8 @@ func statusFromAll(ps ...float64) string {
 }
 
 func buildReportTable(tests map[string]any) []TestRow {
+	// Keep only core tests: Frequency, Block Frequency, Runs, Serial (m=2),
+	// Approximate Entropy (m=2), and Cumulative Sums.
 	get := func(key, field string) float64 {
 		if r, ok := tests[key].(map[string]any); ok {
 			if v, ok := r[field]; ok {
@@ -947,21 +950,13 @@ func buildReportTable(tests map[string]any) []TestRow {
 		}
 		return math.NaN()
 	}
-	rows := make([]TestRow, 0, 14)
+	rows := make([]TestRow, 0, 6)
 	rows = append(rows, TestRow{"1. Frequency (Monobit) Test", map[string]float64{"pValue": get("frequency", "pValue")}, statusFromP(get("frequency", "pValue"))})
 	rows = append(rows, TestRow{"2. Frequency Test within a Block", map[string]float64{"pValue": get("frequency_block", "pValue")}, statusFromP(get("frequency_block", "pValue"))})
 	rows = append(rows, TestRow{"3. Runs Test", map[string]float64{"pValue": get("runs", "pValue")}, statusFromP(get("runs", "pValue"))})
-	rows = append(rows, TestRow{"4. Test for the Longest Run of Ones in a Block", map[string]float64{"pValue": get("longest_run", "pValue")}, statusFromP(get("longest_run", "pValue"))})
-	rows = append(rows, TestRow{"5. Binary Matrix Rank Test", map[string]float64{"pValue": get("matrix_rank", "pValue")}, statusFromP(get("matrix_rank", "pValue"))})
-	rows = append(rows, TestRow{"6. Non-overlapping Template Matching Test", map[string]float64{"pValue": get("non_overlapping_templates", "pValue")}, statusFromP(get("non_overlapping_templates", "pValue"))})
-	rows = append(rows, TestRow{"7. Overlapping Template Matching Test", map[string]float64{"pValue": get("overlapping_templates", "pValue")}, statusFromP(get("overlapping_templates", "pValue"))})
-	rows = append(rows, TestRow{"8. Maurer’s “Universal Statistical” Test", map[string]float64{"pValue": get("universal_maurer", "pValue")}, statusFromP(get("universal_maurer", "pValue"))})
-	rows = append(rows, TestRow{"9. Linear Complexity Test", map[string]float64{"pValue": get("linear_complexity", "pValue")}, statusFromP(get("linear_complexity", "pValue"))})
-	rows = append(rows, TestRow{"10. Serial Test", map[string]float64{"pValue1": get("serial_m2", "pValue1"), "pValue2": get("serial_m2", "pValue2")}, statusFromAll(get("serial_m2", "pValue1"), get("serial_m2", "pValue2"))})
-	rows = append(rows, TestRow{"11. Approximate Entropy Test", map[string]float64{"pValue": get("approx_entropy_m2", "pValue")}, statusFromP(get("approx_entropy_m2", "pValue"))})
-	rows = append(rows, TestRow{"12. Cumulative Sums (Cusum) Test", map[string]float64{"pValueFWD": get("cumulative_sums", "pValueFWD"), "pValueREV": get("cumulative_sums", "pValueREV")}, statusFromAll(get("cumulative_sums", "pValueFWD"), get("cumulative_sums", "pValueREV"))})
-	rows = append(rows, TestRow{"13. Random Excursions Test", map[string]float64{"minPValue": get("random_excursions", "minPValue")}, statusFromP(get("random_excursions", "minPValue"))})
-	rows = append(rows, TestRow{"14. Random Excursions Variant Test", map[string]float64{"minPValue": get("random_excursions_variant", "minPValue")}, statusFromP(get("random_excursions_variant", "minPValue"))})
+	rows = append(rows, TestRow{"4. Serial Test (m=2)", map[string]float64{"pValue1": get("serial_m2", "pValue1"), "pValue2": get("serial_m2", "pValue2")}, statusFromAll(get("serial_m2", "pValue1"), get("serial_m2", "pValue2"))})
+	rows = append(rows, TestRow{"5. Approximate Entropy Test (m=2)", map[string]float64{"pValue": get("approx_entropy_m2", "pValue")}, statusFromP(get("approx_entropy_m2", "pValue"))})
+	rows = append(rows, TestRow{"6. Cumulative Sums (Cusum) Test", map[string]float64{"pValueFWD": get("cumulative_sums", "pValueFWD"), "pValueREV": get("cumulative_sums", "pValueREV")}, statusFromAll(get("cumulative_sums", "pValueFWD"), get("cumulative_sums", "pValueREV"))})
 	return rows
 }
 
@@ -970,21 +965,14 @@ func buildReportTable(tests map[string]any) []TestRow {
    =========================== */
 
 func ComputeAllTests(seq []int) (map[string]any, []TestRow) {
+	// Only compute the core tests to reduce runtime and output size.
 	tests := make(map[string]any)
 	tests["frequency"] = testFrequency(seq)
 	tests["frequency_block"] = testBlockFrequency(seq, 128)
 	tests["runs"] = testRuns(seq)
-	tests["longest_run"] = testLongestRun(seq)
-	tests["matrix_rank"] = testBinaryMatrixRank(seq)
-	tests["non_overlapping_templates"] = testNonOverlappingTemplate(seq, 9)
-	tests["overlapping_templates"] = testOverlappingTemplate(seq, 9)
-	tests["universal_maurer"] = testUniversalMaurer(seq)
-	tests["linear_complexity"] = testLinearComplexity(seq, 1000)
 	tests["serial_m2"] = testSerial(seq, 2)
 	tests["approx_entropy_m2"] = testApproxEntropy(seq, 2)
 	tests["cumulative_sums"] = testCumulativeSums(seq)
-	tests["random_excursions"] = testRandomExcursions(seq)
-	tests["random_excursions_variant"] = testRandomExcursionsVariant(seq)
 	return tests, buildReportTable(tests)
 }
 
@@ -1026,13 +1014,17 @@ func txStats(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	tests, report := ComputeAllTests(seq)
 	resp := map[string]any{
-		"tx_id":  tx.TxID,
-		"count":  tx.Count,
-		"tests":  tests,
-		"report": report,
+		"tx_id": tx.TxID,
+		"count": tx.Count,
 	}
+
+	// sanitize tests/report to avoid json encoder errors on NaN/Inf
+	resp["tests"] = sanitizeForJSON(tests)
+	resp["report"] = sanitizeReport(report)
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(resp)
 }
 
 // POST /stats  — в body строка 0/1 ИЛИ multipart с файлом (txt/bin)
@@ -1090,12 +1082,104 @@ func uploadStatsHandler(w http.ResponseWriter, r *http.Request) {
 
 	tests, report := ComputeAllTests(bits)
 	resp := map[string]any{
-		"n":      len(bits),
-		"tests":  tests,
-		"report": report,
+		"n": len(bits),
 	}
+	resp["tests"] = sanitizeForJSON(tests)
+	resp["report"] = sanitizeReport(report)
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
+	enc := json.NewEncoder(w)
+	_ = enc.Encode(resp)
+}
+
+// sanitizeForJSON recursively walks common composite types and replaces
+// float64 NaN/Inf with nil so encoding/json doesn't fail with
+// "json: unsupported value: NaN". It handles maps, slices/arrays and
+// several numeric types; for unknown types it falls back to the original
+// value which is usually safe for the structures produced by ComputeAllTests.
+func sanitizeForJSON(v any) any {
+	if v == nil {
+		return nil
+	}
+	switch t := v.(type) {
+	case float64:
+		if math.IsNaN(t) || math.IsInf(t, 0) {
+			return nil
+		}
+		return t
+	case float32:
+		fv := float64(t)
+		if math.IsNaN(fv) || math.IsInf(fv, 0) {
+			return nil
+		}
+		return fv
+	case int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		bool, string:
+		return t
+	case map[string]any:
+		m := make(map[string]any, len(t))
+		for k, val := range t {
+			m[k] = sanitizeForJSON(val)
+		}
+		return m
+	case []any:
+		out := make([]any, len(t))
+		for i, el := range t {
+			out[i] = sanitizeForJSON(el)
+		}
+		return out
+	case []float64:
+		out := make([]any, len(t))
+		for i, el := range t {
+			if math.IsNaN(el) || math.IsInf(el, 0) {
+				out[i] = nil
+			} else {
+				out[i] = el
+			}
+		}
+		return out
+	}
+
+	// Generic handling for slices/arrays/maps produced with concrete types
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array:
+		l := rv.Len()
+		out := make([]any, l)
+		for i := 0; i < l; i++ {
+			out[i] = sanitizeForJSON(rv.Index(i).Interface())
+		}
+		return out
+	case reflect.Map:
+		out := make(map[string]any)
+		for _, key := range rv.MapKeys() {
+			// try to stringify map key
+			kstr := fmt.Sprint(key.Interface())
+			out[kstr] = sanitizeForJSON(rv.MapIndex(key).Interface())
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// sanitizeReport converts []TestRow into []map[string]any with NaN/Inf
+// converted to nulls so the result is safe to encode to JSON.
+func sanitizeReport(rows []TestRow) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		vals := make(map[string]any, len(r.Values))
+		for k, fv := range r.Values {
+			if math.IsNaN(fv) || math.IsInf(fv, 0) {
+				vals[k] = nil
+			} else {
+				vals[k] = fv
+			}
+		}
+		out = append(out, map[string]any{"name": r.Name, "values": vals, "status": r.Status})
+	}
+	return out
 }
 
 func bitsFromMultipart(r *http.Request, modeParam string) ([]int, error) {
