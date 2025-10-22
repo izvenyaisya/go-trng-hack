@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -19,6 +22,8 @@ var (
 	txMutex    sync.RWMutex
 	chain      = make([]Block, 0)
 	chainMutex sync.RWMutex
+	// in-memory signing key for tier signatures (HMAC-SHA256)
+	signingKey []byte
 )
 
 func appendBlock(tx *Transaction) {
@@ -81,10 +86,32 @@ func newUUID() string {
 		b[10:16])
 }
 
+// initSigningKey ensures we have an in-memory signing key; if nil, generate one.
+func initSigningKey() {
+	if len(signingKey) == 0 {
+		k := make([]byte, 32)
+		_, _ = rand.Read(k)
+		signingKey = k
+	}
+}
+
+// signTierPayload computes HMAC-SHA256 over provided payload
+func signTierPayload(payload []byte) string {
+	if len(signingKey) == 0 {
+		initSigningKey()
+	}
+	mac := hmac.New(sha256.New, signingKey)
+	mac.Write(payload)
+	return fmt.Sprintf("%x", mac.Sum(nil))
+}
+
 // persistence
 type persistedStore struct {
 	TxStore map[string]*Transaction `json:"tx_store"`
 	Chain   []Block                 `json:"chain"`
+	// signing key stored as hex; if SIGNING_KEY_PASSPHRASE set at runtime then the value
+	// will be AES-GCM encrypted hex (nonce + ciphertext) and should be decrypted on load.
+	SigningKey string `json:"signing_key,omitempty"`
 }
 
 func storePath() string {
@@ -111,7 +138,22 @@ func saveStore() error {
 	copy(copyChain, chain)
 	chainMutex.RUnlock()
 
-	p := persistedStore{TxStore: copyTx, Chain: copyChain}
+	// persist signing key: encode as hex or encrypted hex if passphrase provided
+	skHex := ""
+	if len(signingKey) > 0 {
+		pass := os.Getenv("SIGNING_KEY_PASSPHRASE")
+		if pass != "" {
+			if enc, err := encryptWithPassphrase(signingKey, pass); err == nil {
+				skHex = enc
+			} else {
+				// fallback to raw hex if encryption fails
+				skHex = hex.EncodeToString(signingKey)
+			}
+		} else {
+			skHex = hex.EncodeToString(signingKey)
+		}
+	}
+	p := persistedStore{TxStore: copyTx, Chain: copyChain, SigningKey: skHex}
 	data, err := json.MarshalIndent(p, "", "  ")
 	if err != nil {
 		return err
@@ -153,6 +195,86 @@ func loadStore() error {
 	chainMutex.Lock()
 	chain = p.Chain
 	chainMutex.Unlock()
+
+	// restore signing key if present
+	if p.SigningKey != "" {
+		pass := os.Getenv("SIGNING_KEY_PASSPHRASE")
+		var sk []byte
+		var err error
+		if pass != "" {
+			// try decrypt with passphrase
+			sk, err = decryptWithPassphrase(p.SigningKey, pass)
+			if err != nil {
+				// fallback: try raw hex decode
+				if b, err2 := hex.DecodeString(p.SigningKey); err2 == nil {
+					sk = b
+					err = nil
+				}
+			}
+		} else {
+			sk, err = hex.DecodeString(p.SigningKey)
+		}
+		if err == nil && len(sk) > 0 {
+			signingKey = sk
+			log.Printf("restored signing key from store")
+		} else {
+			log.Printf("failed to restore signing key from store: %v", err)
+		}
+	}
 	log.Printf("loaded store: %d transactions, %d blocks", len(txStore), len(chain))
 	return nil
+}
+
+// deriveKeyFromPassphrase: SHA256(passphrase)
+func deriveKeyFromPassphrase(pass string) []byte {
+	h := sha256.Sum256([]byte(pass))
+	return h[:]
+}
+
+// encryptWithPassphrase encrypts raw bytes with AES-GCM and returns hex(nonce|ciphertext)
+func encryptWithPassphrase(raw []byte, pass string) (string, error) {
+	key := deriveKeyFromPassphrase(pass)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	g, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, g.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	ct := g.Seal(nil, nonce, raw, nil)
+	out := append(nonce, ct...)
+	return hex.EncodeToString(out), nil
+}
+
+// decryptWithPassphrase decodes hex(nonce|ciphertext) and decrypts with AES-GCM
+func decryptWithPassphrase(hexIn string, pass string) ([]byte, error) {
+	data, err := hex.DecodeString(hexIn)
+	if err != nil {
+		return nil, err
+	}
+	key := deriveKeyFromPassphrase(pass)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	g, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	ns := g.NonceSize()
+	if len(data) < ns {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce := data[:ns]
+	ct := data[ns:]
+	pt, err := g.Open(nil, nonce, ct, nil)
+	if err != nil {
+		return nil, err
+	}
+	return pt, nil
 }

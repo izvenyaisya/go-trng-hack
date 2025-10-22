@@ -81,6 +81,10 @@ type Transaction struct {
 	BitsHash   string               `json:"bits_hash"` // SHA256(итоговых бит)
 	Published  string               `json:"published"` // HKDF(bitsHash, dataHash, label)
 	Provenance GenerationProvenance `json:"provenance"`
+	// Tier (lottery/draw) related fields
+	TierNumbers []int  `json:"tier_numbers,omitempty"`
+	TierWinners []int  `json:"tier_winners,omitempty"`
+	Signature   string `json:"signature,omitempty"` // HMAC-SHA256 signature over tier payload
 }
 
 type Block struct {

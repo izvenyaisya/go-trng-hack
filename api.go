@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -174,6 +176,8 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 6) сохраняем
 	txMutex.Lock()
+	tx.Provenance.Entropy.Mode = entropyTag
+
 	txStore[tx.TxID] = tx
 	txMutex.Unlock()
 	appendBlock(tx)
@@ -200,6 +204,147 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 			"step":         gp.Step,
 			"whiten":       gp.Whiten,
 		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// /generate-tier?min=1&max=49&n=10&t=3&entropy=repro&seed=123
+// generates n numbers in [min,max], then selects t winning numbers from them.
+// Stores numbers and winners in transaction, signs the payload and appends to chain.
+func generateTierHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	min := atoi(q.Get("min"), 1)
+	max := atoi(q.Get("max"), 49)
+	if max < min {
+		http.Error(w, "max must be >= min", http.StatusBadRequest)
+		return
+	}
+	n := atoi(q.Get("n"), 10)
+	if n <= 0 {
+		http.Error(w, "n must be > 0", http.StatusBadRequest)
+		return
+	}
+	t := atoi(q.Get("t"), 1)
+	if t <= 0 || t > n {
+		http.Error(w, "t must be >0 and <= n", http.StatusBadRequest)
+		return
+	}
+
+	// entropy options (reuse deriveSeed input pattern)
+	entMode := strings.ToLower(q.Get("entropy"))
+	if entMode == "" {
+		entMode = "mix"
+	}
+	gpEntropy := EntropySpec{Mode: entMode}
+	if seedStr := q.Get("seed"); seedStr != "" {
+		if s, err := strconv.ParseInt(seedStr, 10, 64); err == nil {
+			gpEntropy.Seed64 = s
+			gpEntropy.Mode = "repro"
+		}
+	}
+
+	seed, tag, perSeeds := deriveSeed(gpEntropy)
+
+	// initialize TRNG and sample without replacement using Fisher–Yates driven by TRNG
+	tr := NewTRNGFromSeed(seed, perSeeds)
+	rngRange := max - min + 1
+	if n > rngRange {
+		http.Error(w, "n must be <= (max-min+1)", http.StatusBadRequest)
+		return
+	}
+
+	// build pool [min..max]
+	poolSize := rngRange
+	pool := make([]int, 0, poolSize)
+	for v := min; v <= max; v++ {
+		pool = append(pool, v)
+	}
+
+	// Fisher–Yates shuffle using TRNG as randomness source
+	for i := poolSize - 1; i > 0; i-- {
+		b := tr.ReadBytes(8)
+		j := int(binary.LittleEndian.Uint64(b) % uint64(i+1))
+		pool[i], pool[j] = pool[j], pool[i]
+	}
+
+	// first n items are our unique numbers
+	nums := make([]int, n)
+	copy(nums, pool[:n])
+
+	// select t unique winners from the n numbers by shuffling indices using TRNG
+	idxs := make([]int, n)
+	for i := range idxs {
+		idxs[i] = i
+	}
+	for i := n - 1; i > 0; i-- {
+		b := tr.ReadBytes(8)
+		j := int(binary.LittleEndian.Uint64(b) % uint64(i+1))
+		idxs[i], idxs[j] = idxs[j], idxs[i]
+	}
+	winners := make([]int, t)
+	for k := 0; k < t; k++ {
+		winners[k] = nums[idxs[k]]
+	}
+
+	// compute signature over payload: txid will be added after tx created; sign numbers+winners+seed
+	payloadStruct := map[string]any{
+		"seed":    seed,
+		"numbers": nums,
+		"winners": winners,
+	}
+	payloadB, _ := json.Marshal(payloadStruct)
+
+	// create transaction
+	tx := &Transaction{
+		TxID:      newUUID(),
+		CreatedAt: time.Now().UTC(),
+		Count:     n,
+		Seed:      seed,
+		Sim:       SimulationData{},
+		DataHash:  "",
+		BitsHash:  "",
+		Published: "",
+		Provenance: GenerationProvenance{
+			Entropy:      gpEntropy,
+			Motion:       MotionSpec{},
+			Iterations:   0,
+			NumPoints:    0,
+			PixelWidth:   0,
+			CanvasW:      0,
+			CanvasH:      0,
+			Step:         0,
+			Whiten:       "",
+			PerHTTPSeeds: perSeeds,
+		},
+		TierNumbers: nums,
+		TierWinners: winners,
+	}
+
+	// annotate provenance mode with human-readable tag
+	tx.Provenance.Entropy.Mode = tag
+
+	// sign payload
+	sig := signTierPayload(payloadB)
+	tx.Signature = sig
+
+	// store and publish minimal block info: use Published field to store signature's hex as published
+	tx.Published = sig
+
+	txMutex.Lock()
+	txStore[tx.TxID] = tx
+	txMutex.Unlock()
+	appendBlock(tx)
+
+	resp := map[string]any{
+		"tx_id":     tx.TxID,
+		"numbers":   nums,
+		"winners":   winners,
+		"signature": sig,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -245,10 +390,61 @@ func txRouter(w http.ResponseWriter, r *http.Request) {
 		txTRNG(w, r, id)
 	case "stats":
 		txStats(w, r, id)
+	case "tier":
+		txTier(w, r, id)
+	case "verify-signature":
+		txVerifySignature(w, r, id)
 	default:
 		log.Printf("txRouter: unknown action '%s' for tx %s", action, id)
 		http.Error(w, "unknown tx action", http.StatusNotFound)
 	}
+}
+
+// txVerifySignature recomputes payload and verifies stored HMAC signature using in-memory signingKey
+func txVerifySignature(w http.ResponseWriter, r *http.Request, id string) {
+	tx := mustTx(id, w)
+	if tx == nil {
+		return
+	}
+	// payload used at signing time: {seed, numbers, winners}
+	payloadStruct := map[string]any{
+		"seed":    tx.Seed,
+		"numbers": tx.TierNumbers,
+		"winners": tx.TierWinners,
+	}
+	payloadB, _ := json.Marshal(payloadStruct)
+
+	// compute expected signature using signingKey
+	if len(signingKey) == 0 {
+		initSigningKey()
+	}
+	mac := hmac.New(sha256.New, signingKey)
+	mac.Write(payloadB)
+	expected := fmt.Sprintf("%x", mac.Sum(nil))
+
+	out := map[string]any{
+		"tx_id":           tx.TxID,
+		"signature_match": expected == tx.Signature,
+		"expected":        expected,
+		"actual":          tx.Signature,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+func txTier(w http.ResponseWriter, r *http.Request, id string) {
+	tx := mustTx(id, w)
+	if tx == nil {
+		return
+	}
+	out := map[string]any{
+		"tx_id":     tx.TxID,
+		"numbers":   tx.TierNumbers,
+		"winners":   tx.TierWinners,
+		"signature": tx.Signature,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func txPNG(w http.ResponseWriter, r *http.Request, id string) {

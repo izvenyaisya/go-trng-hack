@@ -54,6 +54,59 @@ TRNG internals (из `trng.go` / `drbg.go`)
 - Транзакции и блоки хранятся в памяти (`txStore`, `chain`) и сериализуются в `store.json` (в текущий рабочий каталог). Вызов `saveStore()` пишет временный файл и переименовывает его в `store.json`.
 - При старте `main()` пробует загрузить `store.json`; если файл отсутствует или повреждён, создаётся пустой `store.json`.
 
+Подписи и хранение signing key
+--------------------------------
+Для обеспечения неизменности результатов и возможности доказать, что наборы чисел действительно были сгенерированы сервером, проект сохраняет HMAC-подписи для операций tier (лотерей/тиров).
+
+Как это работает в коде:
+- Для `/generate-tier` создаётся payload {seed, numbers, winners} и рассчитывается HMAC-SHA256 подпись по signing key.
+- Подпись сохраняется в `Transaction.Signature` и также в поле `Transaction.Published` (т.е. попадает в блок и `Block.DataHash`).
+
+Персистентность ключа:
+- signing key хранится в `store.json` в поле `signing_key` как hex-строка по умолчанию.
+- Для безопасности вы можете задать переменную окружения `SIGNING_KEY_PASSPHRASE`. В этом случае при сохранении ключ будет зашифрован AES-GCM (ключ для AES берётся из SHA256(passphrase)) и в `store.json` сохранится hex(nonce|ciphertext). При загрузке `loadStore()` будет пытаться расшифровать ключ, если `SIGNING_KEY_PASSPHRASE` задана.
+- Если вы хотите, чтобы подписи были воспроизводимы между перезапусками, задайте постоянную фразу `SIGNING_KEY_PASSPHRASE` в окружении сервера или заранее положите hex-ключ в `store.json`.
+
+Безопасность и рекомендации:
+- Хранение ключа в `store.json` (особенно в незашифрованном виде) требует доверия к файловой системе — кто имеет доступ к файлу, может подделывать подписи. Рекомендуется использовать `SIGNING_KEY_PASSPHRASE` и хранить пассфразу в защищённом секретном хранилище.
+- Для более строгих гарантий используйте HSM/KMS или подпись GPG вместо HMAC.
+
+Новые endpoints (tier и подписи)
+--------------------------------
+- `GET /generate-tier?min=<min>&max=<max>&n=<n>&t=<t>&entropy=<mode>&seed=<seed>`
+  - Генерирует уникальные n чисел в диапазоне [min..max] (без повторов) на основе TRNG.
+  - Выбирает t уникальных победителей среди этих n с помощью TRNG.
+  - Сохраняет транзакцию с `TierNumbers`, `TierWinners` и `Signature` и добавляет блок.
+  - Возвращает JSON: `{tx_id, numbers, winners, signature}`.
+
+- `GET /tx/{id}/tier`
+  - Возвращает сохранённые `numbers`, `winners` и `signature` для транзакции.
+
+- `GET /tx/{id}/verify-signature`
+  - Пересчитывает payload {seed, numbers, winners} и проверяет HMAC-SHA256 подпись, используя signing key, восстановленный из `store.json` (и расшифрованный при наличии `SIGNING_KEY_PASSPHRASE`). Возвращает JSON с полем `signature_match` и ожидаемой/фактической подписью.
+
+Пример (PowerShell)
+
+```powershell
+# Запустить сервер (в отдельном окне):
+# $env:SIGNING_KEY_PASSPHRASE = "my-secret"; go run .
+
+$resp = Invoke-RestMethod -Uri 'http://localhost:4040/generate-tier?min=1&max=49&n=10&t=3&entropy=repro&seed=12345' -Method Get
+$txid = $resp.tx_id
+Invoke-RestMethod -Uri "http://localhost:4040/tx/$txid/tier" -Method Get | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Uri "http://localhost:4040/tx/$txid/verify-signature" -Method Get
+```
+
+Пример (curl):
+
+```bash
+curl -s "http://localhost:4040/generate-tier?min=1&max=49&n=10&t=3&entropy=repro&seed=12345" -o tier.json
+jq . tier.json
+id=$(jq -r .tx_id tier.json)
+curl "http://localhost:4040/tx/$id/tier" | jq .
+curl "http://localhost:4040/tx/$id/verify-signature" | jq .
+```
+
 Суть псевдо-блокчейна
 ---------------------
 Цель псевдо-блокчейна в этом проекте — обеспечить простой, человечески читаемый и локально проверяемый журнал генераций (транзакций) с минимальным набором целостностных проверок. Это не распределённая блокчейн-система и не попытка заменить механизм консенсуса; скорее, это локальная цепочка «отпечатков» для аудита и обнаружения изменений.

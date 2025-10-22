@@ -30,6 +30,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/generate", generateHandler)
+	mux.HandleFunc("/generate-tier", generateTierHandler)
 	mux.HandleFunc("/tx/", txRouter)
 	mux.HandleFunc("/txs", txsHandler)
 	mux.HandleFunc("/chain", chainHandler)
