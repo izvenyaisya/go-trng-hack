@@ -27,6 +27,10 @@ func RunMonobit(bits []byte) (float64, error) {
 	cptr := (*C.uchar)(unsafe.Pointer(&bits[0]))
 	clen := C.ulong(len(bits))
 
+	// avoid unused variable errors while the real C call is not wired yet
+	_ = cptr
+	_ = clen
+
 	var pval C.double
 
 	// Example: replace `monobit_test` with the real function name
