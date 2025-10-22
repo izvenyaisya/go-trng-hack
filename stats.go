@@ -151,11 +151,45 @@ func txStats(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	if mode == "nist" {
-		// return structured JSON result from local runner
-		j := localNISTJSON(bits)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(j)
-		log.Printf("txStats: local NIST-like JSON report generated for tx %s", id)
+		// if 'assess' (NIST STS) is installed, run it on ASCII bits; otherwise fall back
+		if _, err := exec.LookPath("assess"); err != nil {
+			// assess not found — run local JSON runner
+			j := localNISTJSON(bits)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(j)
+			log.Printf("txStats: local NIST-like JSON report generated for tx %s", id)
+			return
+		}
+
+		// write ASCII bit file for assess
+		tmpNName, bitCount, err := writeASCIIBitsTemp(bits)
+		if err != nil {
+			http.Error(w, "failed to prepare bits for NIST assess", http.StatusInternalServerError)
+			return
+		}
+		defer os.Remove(tmpNName)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "assess", tmpNName)
+		var outBuf bytes.Buffer
+		cmd.Stdout = &outBuf
+		cmd.Stderr = &outBuf
+		log.Printf("txStats: running assess for tx %s (file=%s)", id, tmpNName)
+		if err := cmd.Run(); err != nil {
+			w.Header().Set("Content-Type", "text/plain")
+			w.Write([]byte("nist assess failed: " + err.Error() + "\n\n"))
+			_, _ = io.Copy(w, &outBuf)
+			log.Printf("txStats: assess failed for tx %s: %v", id, err)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain")
+		if bitCount < 1_000_000 {
+			_, _ = w.Write([]byte(fmt.Sprintf("NOTE: input has %d bits; NIST STS may skip/ERROR some tests for small samples\n\n", bitCount)))
+		}
+		_, _ = io.Copy(w, &outBuf)
+		log.Printf("txStats: assess completed for tx %s", id)
 		return
 	}
 

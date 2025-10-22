@@ -34,7 +34,6 @@ func main() {
 	mux.HandleFunc("/txs", txsHandler)
 	mux.HandleFunc("/chain", chainHandler)
 	mux.HandleFunc("/stats/upload", uploadStatsHandler)
-	// use rs/cors with permissive defaults
 	c := cors.New(cors.Options{
 		AllowOriginFunc:  nil,
 		AllowedOrigins:   []string{"*"},

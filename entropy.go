@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -143,7 +144,16 @@ func rawFromHTTP(urls []string) []byte {
 					}
 				}
 				if sbody != "" {
-					// deterministic: hash the trimmed plain-text (no time salt)
+					// if body is a decimal integer, parse it and return its little-endian int64 bytes
+					if iv, err := strconv.ParseInt(sbody, 10, 64); err == nil {
+						var buf [8]byte
+						binary.LittleEndian.PutUint64(buf[:], uint64(iv))
+						direct = make([]byte, 8)
+						copy(direct, buf[:])
+						gotDirect = true
+						return
+					}
+					// otherwise, deterministic: hash the trimmed plain-text (no time salt)
 					hh := sha256.Sum256([]byte(sbody))
 					h.Write(hh[:])
 					return
