@@ -70,7 +70,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 		Entropy: EntropySpec{
 			Mode:   strings.ToLower(q.Get("entropy")),
 			Seed64: 0,
-			HTTP:   []string{"https://87ct9p48-8000.euw.devtunnels.ms/last_seed"},
+			HTTP:   []string{"https://candle.api.chaos.izvenyaisya.ru/last_seed"},
 		},
 		Whiten: strings.ToLower(q.Get("whiten")),
 	}
