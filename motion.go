@@ -201,7 +201,8 @@ func expandBitsFromPathDigest(digest [32]byte, outBits int, mode string) []byte 
 	}
 
 	// AES-CTR based mode: derive AES-256 key and IV from digest and stream out bytes
-	if mode == "aes" {
+	// hybrid mode: AES-CTR keystream XORed with HMAC-SHA256 keystream (reduces simple correlations)
+	if mode == "aes" || mode == "hybrid" || mode == "aes+hmac" {
 		// derive key = SHA256(digest||"aes-ctr-key-v1")
 		kInput := make([]byte, 0, len(digest)+16)
 		kInput = append(kInput, digest[:]...)
@@ -248,6 +249,30 @@ func expandBitsFromPathDigest(digest [32]byte, outBits int, mode string) []byte 
 		needed := (outBits + 7) / 8
 		buf := make([]byte, needed)
 		stream.XORKeyStream(buf, buf) // XOR with zero => just fills buf with keystream
+
+		// If hybrid/aes+hmac requested, mix AES keystream with HMAC-SHA256-derived keystream
+		if mode == "hybrid" || mode == "aes+hmac" {
+			// keySum is 32 bytes; use it as HMAC key and ivSum[:16] as context
+			// produce hmac blocks and XOR into buf
+			var off int
+			var ctrIdx uint64 = 0
+			for off < len(buf) {
+				// message: iv || ctrIdx
+				var m []byte
+				m = append(m, ivSum[:aes.BlockSize]...)
+				var cBuf [8]byte
+				binary.LittleEndian.PutUint64(cBuf[:], ctrIdx)
+				m = append(m, cBuf[:]...)
+				h := hmacSHA256(keySum[:], m)
+				// XOR h (32 bytes) into buf at offset
+				for i := 0; i < len(h) && off < len(buf); i++ {
+					buf[off] ^= h[i]
+					off++
+				}
+				ctrIdx++
+			}
+		}
+
 		for _, b := range buf {
 			for bit := 7; bit >= 0 && used < outBits; bit-- {
 				out[used] = (b >> uint(bit)) & 1

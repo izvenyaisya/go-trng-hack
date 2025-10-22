@@ -15,14 +15,29 @@ func writePNG(w http.ResponseWriter, sim SimulationData) error {
 	img := image.NewRGBA(image.Rect(0, 0, sim.CanvasWidth, sim.CanvasHeight))
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.White}, image.Point{}, draw.Src)
 
+	// Draw in time slices so all points start drawing simultaneously.
+	// Find the longest path length among points.
+	maxLen := 0
 	for _, p := range sim.Points {
-		col := parseHexColor(p.Color)
-		px := p.PixelWidth
-		if px <= 0 {
-			px = 3
+		if len(p.Path) > maxLen {
+			maxLen = len(p.Path)
 		}
-		r := px / 2
-		for i := 1; i < len(p.Path); i++ {
+	}
+
+	// Iterate over path indices (time steps). For each step i, draw the segment
+	// from i-1 -> i for every point that has it. This makes the first segment
+	// of every line appear in the same pass.
+	for i := 1; i < maxLen; i++ {
+		for _, p := range sim.Points {
+			if len(p.Path) <= i {
+				continue
+			}
+			col := parseHexColor(p.Color)
+			px := p.PixelWidth
+			if px <= 0 {
+				px = 3
+			}
+			r := px / 2
 			x0 := int(math.Round(p.Path[i-1].X))
 			y0 := int(math.Round(p.Path[i-1].Y))
 			x1 := int(math.Round(p.Path[i].X))

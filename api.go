@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,11 @@ func atoi(q string, def int) int {
 		return def
 	}
 	return v
+}
+
+// utility to build a new URL with same path and provided query values
+func newURLWithQuery(path string, q url.Values) *url.URL {
+	return &url.URL{Path: path, RawQuery: q.Encode()}
 }
 func atof(q string, def float64) float64 {
 	if q == "" {
@@ -99,7 +105,7 @@ func generateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// leave gp.Entropy.HTTP as set in constructor when no http query param is provided
 	if q.Get("whiten") == "" {
-		gp.Whiten = "aes"
+		gp.Whiten = "hybrid"
 	}
 
 	log.Printf("generate: starting generation (count=%d, whiten=%s, law=%s, entropy=%s)", gp.Count, gp.Whiten, gp.Motion.Law, gp.Entropy.Mode)
@@ -264,54 +270,25 @@ func txJSON(w http.ResponseWriter, r *http.Request, id string) {
 	_ = json.NewEncoder(w).Encode(tx.Sim)
 }
 func txTXT(w http.ResponseWriter, r *http.Request, id string) {
-	tx := mustTx(id, w)
-	if tx == nil {
-		return
-	}
-	// регенерируем биты детерминированно из pathDigest → для этого пересобираем digest
-	gp := paramsFromTx(tx)
-	_, digest := runSimulation(tx.Seed, gp)
-	bits := expandBitsFromPathDigest(digest, tx.Count, gp.Whiten)
-
-	w.Header().Set("Content-Type", "text/plain")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.txt\"", id))
-	for _, b := range bits {
-		if b == 0 {
-			_, _ = w.Write([]byte{'0'})
-		} else {
-			_, _ = w.Write([]byte{'1'})
-		}
-	}
+	// Alias to /tx/{id}/trng?format=bin&type=txt
+	// We simply construct a new request-like URL with the desired query params and call txTRNG
+	q := r.URL.Query()
+	q.Set("format", "bin")
+	q.Set("type", "txt")
+	// replace r.URL.RawQuery for downstream handler
+	r2 := *r
+	r2.URL = newURLWithQuery(r.URL.Path, q)
+	txTRNG(w, &r2, id)
 }
 
 func txBIN(w http.ResponseWriter, r *http.Request, id string) {
-	tx := mustTx(id, w)
-	if tx == nil {
-		return
-	}
-	gp := paramsFromTx(tx)
-	_, digest := runSimulation(tx.Seed, gp)
-	bits := expandBitsFromPathDigest(digest, tx.Count, gp.Whiten)
-
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.bin\"", id))
-	// pack MSB-first
-	var cur byte
-	used := 0
-	out := make([]byte, 0, len(bits)/8+1)
-	for _, b := range bits {
-		cur = (cur << 1) | (b & 1)
-		used++
-		if used == 8 {
-			out = append(out, cur)
-			cur, used = 0, 0
-		}
-	}
-	if used > 0 {
-		cur <<= uint(8 - used)
-		out = append(out, cur)
-	}
-	_, _ = w.Write(out)
+	// Alias to /tx/{id}/trng?format=raw&type=bin
+	q := r.URL.Query()
+	q.Set("format", "raw")
+	q.Set("type", "bin")
+	r2 := *r
+	r2.URL = newURLWithQuery(r.URL.Path, q)
+	txTRNG(w, &r2, id)
 }
 func txVerify(w http.ResponseWriter, r *http.Request, id string) {
 	ok := validateChain()
@@ -321,10 +298,13 @@ func txVerify(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	// пересчёт dataHash и bitsHash
+	// Важно: при генерации DataHash вычислялся как SHA256(pathDigest)
+	// (см. generateHandler). Ранее здесь ошибочно хешировался JSON симуляции,
+	// что приводило к постоянному несоответствию. Считаем так же, как при генерации.
 	gp := paramsFromTx(tx)
-	sim2, digest := runSimulation(tx.Seed, gp)
-	dataBytes, _ := json.Marshal(sim2)
-	dh2 := sha256.Sum256(dataBytes)
+	_, digest := runSimulation(tx.Seed, gp)
+	// dh2 должен быть SHA256 от path-digest, чтобы совпадать с tx.DataHash
+	dh2 := sha256.Sum256(digest[:])
 	bits := expandBitsFromPathDigest(digest, tx.Count, gp.Whiten)
 	hb := sha256.New()
 	for _, b := range bits {
@@ -431,32 +411,97 @@ func txReproduce(w http.ResponseWriter, r *http.Request, id string) {
 	}
 }
 
-// /tx/{id}/trng?n=64&format=bin|hex
+// /tx/{id}/trng?n=64&format=hex|bin|raw&type=txt|bin
+// - format=hex  : default, returns hex string of the raw bytes
+// - format=raw  : returns raw bytes (previously 'bin')
+// - format=bin  : returns textual bitstring like "101010..." (MSB-first per byte)
+// type controls Content-Disposition/filename extension: txt => .txt (text/plain), bin => .bin (application/octet-stream)
 func txTRNG(w http.ResponseWriter, r *http.Request, id string) {
 	tx := mustTx(id, w)
 	if tx == nil {
 		return
 	}
 	q := r.URL.Query()
-	n := atoi(q.Get("n"), 64)
-	if n <= 0 {
-		n = 64
+	// n is number of bits; default to tx.Count (stored in bits)
+	nBits := atoi(q.Get("n"), -1)
+	if nBits <= 0 {
+		nBits = tx.Count
 	}
 	format := strings.ToLower(q.Get("format"))
 	if format == "" {
 		format = "hex"
 	}
+	typ := strings.ToLower(q.Get("type"))
 
 	tr := NewTRNGFromTx(tx)
-	data := tr.ReadBytes(n)
+	needed := (nBits + 7) / 8
+	data := tr.ReadBytes(needed)
 
-	if format == "bin" {
-		w.Header().Set("Content-Type", "application/octet-stream")
+	// zero out unused LSBs in last byte so packed output contains exactly nBits
+	if nBits%8 != 0 {
+		keep := uint(nBits % 8)
+		mask := byte(0xFF) << (8 - keep)
+		data[needed-1] &= mask
+	}
+
+	// prepare Content-Type and Content-Disposition based on type param
+	var contentType string
+	var ext string
+	switch typ {
+	case "bin":
+		contentType = "application/octet-stream"
+		ext = "bin"
+	case "txt":
+		contentType = "text/plain"
+		ext = "txt"
+	default:
+		if format == "raw" || format == "bytes" {
+			contentType = "application/octet-stream"
+			ext = "bin"
+		} else {
+			contentType = "text/plain"
+			ext = "txt"
+		}
+	}
+
+	// handle raw bytes
+	if format == "raw" || format == "bytes" {
+		w.Header().Set("Content-Type", contentType)
+		if ext != "" {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.%s\"", id, ext))
+		}
 		_, _ = w.Write(data)
 		return
 	}
-	// default: hex
-	w.Header().Set("Content-Type", "text/plain")
+
+	// handle textual bit string (MSB-first), exactly nBits characters
+	if format == "bin" {
+		out := make([]byte, 0, nBits)
+		written := 0
+		for i := 0; i < len(data) && written < nBits; i++ {
+			b := data[i]
+			for bit := 7; bit >= 0 && written < nBits; bit-- {
+				if (b>>uint(bit))&1 == 1 {
+					out = append(out, '1')
+				} else {
+					out = append(out, '0')
+				}
+				written++
+			}
+		}
+		w.Header().Set("Content-Type", contentType)
+		if ext != "" {
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.%s\"", id, ext))
+		}
+		_, _ = w.Write(out)
+		return
+	}
+
+	// default: hex of packed bytes covering nBits
+	w.Header().Set("Content-Type", contentType)
+	if ext != "" {
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.%s\"", id, ext))
+	}
 	_, _ = w.Write([]byte(hex.EncodeToString(data)))
 }
 

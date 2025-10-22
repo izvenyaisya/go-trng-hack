@@ -55,7 +55,7 @@ type GenerateParams struct {
 	Entropy    EntropySpec
 	Motion     MotionSpec
 	Step       float64 // шаг времени для симуляции
-	Whiten     string  // off|on|hmac
+	Whiten     string  // off|on|hmac|aes|hybrid
 }
 
 type GenerationProvenance struct {
